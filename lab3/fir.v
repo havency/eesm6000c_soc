@@ -1,25 +1,11 @@
 module fir 
-#(  parameter pADDR_WIDTH = 12,
+#(
+    parameter pADDR_WIDTH = 12,
     parameter pDATA_WIDTH = 32,
-    parameter Tape_Num    = 11,
-        // AXI parameters for states
-    parameter AXILITE_FSM_RESET    = 3'b000,
-    parameter AXILITE_FSM_IDLE     = 3'b001,
-    parameter AXILITE_FSM_AWREADY  = 3'b010,
-    parameter AXILITE_FSM_WREADY   = 3'b011,
-    parameter AXILITE_FSM_ARREADY  = 3'b100,
-    parameter AXILITE_FSM_RREADY   = 3'b101,
-    
-    //AXI stream FSM parameters
-    parameter AXISTREAM_FSM_RESET  = 3'b000,
-    parameter AXISTREAM_FSM_IDLE   = 3'b001,
-    parameter AXISTREAM_FSM_INIT   = 3'b010,
-    parameter AXISTREAM_FSM_UPDATE = 3'b011,
-    parameter AXISTREAM_FSM_MULT   = 3'b100,
-    parameter AXISTREAM_FSM_SUM    = 3'b101,
-    parameter AXISTREAM_FSM_OUT    = 3'b110
+    parameter Tape_Num    = 11
 )
 (
+    // AXI-Lite Interface
     output  wire                     awready,
     output  wire                     wready,
     input   wire                     awvalid,
@@ -32,85 +18,140 @@ module fir
     input   wire [(pADDR_WIDTH-1):0] araddr,
     output  wire                     rvalid,
     output  wire [(pDATA_WIDTH-1):0] rdata,    
+
+    // AXI-Stream Interface (Slave)
     input   wire                     ss_tvalid, 
     input   wire [(pDATA_WIDTH-1):0] ss_tdata, 
     input   wire                     ss_tlast, 
     output  wire                     ss_tready, 
+
+    // AXI-Stream Interface (Master)
     input   wire                     sm_tready, 
     output  wire                     sm_tvalid, 
     output  wire [(pDATA_WIDTH-1):0] sm_tdata, 
     output  wire                     sm_tlast, 
-    
-    // bram for tap RAM
+
+    // BRAM Interface for Tap RAM
     output  wire [3:0]               tap_WE,
     output  wire                     tap_EN,
     output  wire [(pDATA_WIDTH-1):0] tap_Di,
     output  wire [(pADDR_WIDTH-1):0] tap_A,
     input   wire [(pDATA_WIDTH-1):0] tap_Do,
 
-    // bram for data RAM
+    // BRAM Interface for Data RAM
     output  wire [3:0]               data_WE,
     output  wire                     data_EN,
     output  wire [(pDATA_WIDTH-1):0] data_Di,
     output  wire [(pADDR_WIDTH-1):0] data_A,
     input   wire [(pDATA_WIDTH-1):0] data_Do,
 
+    // Clock and Reset
     input   wire                     axis_clk,
     input   wire                     axis_rst_n
 );
 
+    // Internal Registers and Signals
+    reg [pDATA_WIDTH-1:0] tap_coeffs [0:Tape_Num-1]; // Tap coefficients
+    reg [pDATA_WIDTH-1:0] data_length;               // Data length
+    reg ap_start;                                    // Start signal
+    reg ap_done;                                     // Done signal
+    reg ap_idle;                                     // Idle signal
 
-    // write your code here!
-    // WE based on data width
-    wire [3:0]                       WE_sel;
-        // AP Config
-    wire                             AP_WE;
-    wire                             AP_EN;
-    wire [2:0]                       AP_Di;
-    wire [(pDATA_WIDTH-1):0]         AP_Do;
-    reg  [2:0]                       AP_reg;//ap register for later configurations
-// Length Configuration Register
-    wire [3:0]                       len_WE;
-    wire                             len_EN;
-    wire [(pDATA_WIDTH-1):0]         len_Di;
-    wire [(pDATA_WIDTH-1):0]         len_Do;
-    reg  [(pDATA_WIDTH-1):0]         len_reg;
- // Tap Number Configuration Register
-    wire [3:0]                       tapnum_WE;
-    wire                             tapnum_EN;
-    wire [(pDATA_WIDTH-1):0]         tapnum_Di;
-    wire [(pDATA_WIDTH-1):0]         tapnum_Do;
-    reg  [(pDATA_WIDTH-1):0]         tapnum_reg;
+    reg [pADDR_WIDTH-1:0] tap_addr;                  // Tap RAM address
+    reg [pADDR_WIDTH-1:0] data_addr;                 // Data RAM address
+    reg [pDATA_WIDTH-1:0] accumulator;               // FIR accumulator
+    reg [pDATA_WIDTH-1:0] input_buffer [0:Tape_Num-1]; // Input data buffer
 
-//axilite stuff
-    reg  [2:0]                       axilite_fsm;
-    reg  [(pADDR_WIDTH-1):0]         axilite_A_pre;
-    reg  [(pDATA_WIDTH-1):0]         axilite_Di_pre;
-    reg                              axilite_rr;
-    wire                             axilite_active;
-    wire                             axilite_ap;
-    wire                             axilite_len;
-    wire                             axilite_num;
-    wire                             axilite_tap;
-    wire [(pDATA_WIDTH-1):0]         axilite_Do;
-    wire [(pADDR_WIDTH-1):0]         axilite_A;
-    wire [(pDATA_WIDTH-1):0]         axilite_Di;
+    // FSM States
+    typedef enum logic [2:0] {
+        IDLE,
+        LOAD_TAPS,
+        PROCESS_DATA,
+        DONE
+    } state_t;
 
-    reg  [2:0]                       axistream_fsm;
-    reg  [(pADDR_WIDTH-1):0]         axistream_A;
-    reg  [(pDATA_WIDTH-1):0]         axistream_data_Di;
-    reg  [(pDATA_WIDTH-1):0]         axistream_data_Do;
-    reg  [(pDATA_WIDTH-1):0]         axistream_mul;
-    reg  [(pDATA_WIDTH-1):0]         axistream_sum;
-    reg                              axistream_sent;
-    reg                              axistream_lastreg;
-    wire                             axistream_active;
-    wire                             axistream_ap;
-    wire                             axistream_tap;
-    wire [(pADDR_WIDTH-1):0]         axistream_tap_A;
-    
-    
-    
+    state_t current_state, next_state;
 
+    // AXI-Lite Interface Logic
+    assign awready = (current_state == IDLE);
+    assign wready  = (current_state == IDLE);
+    assign arready = (current_state == IDLE);
+
+    always @(posedge axis_clk or negedge axis_rst_n) begin
+        if (!axis_rst_n) begin
+            ap_start <= 0;
+            data_length <= 0;
+            tap_coeffs <= '{default: 0};
+        end else if (awvalid && wvalid) begin
+            case (awaddr)
+                12'h000: ap_start <= wdata[0];
+                12'h010: data_length <= wdata;
+                12'h020: tap_coeffs[0] <= wdata;
+                // Add more cases for other tap coefficients
+            endcase
+        end
+    end
+
+    // FSM Logic
+    always @(posedge axis_clk or negedge axis_rst_n) begin
+        if (!axis_rst_n) begin
+            current_state <= IDLE;
+        end else begin
+            current_state <= next_state;
+        end
+    end
+
+    always @(*) begin
+        case (current_state)
+            IDLE: begin
+                if (ap_start) next_state = LOAD_TAPS;
+                else next_state = IDLE;
+            end
+            LOAD_TAPS: begin
+                if (tap_addr == Tape_Num-1) next_state = PROCESS_DATA;
+                else next_state = LOAD_TAPS;
+            end
+            PROCESS_DATA: begin
+                if (data_addr == data_length-1) next_state = DONE;
+                else next_state = PROCESS_DATA;
+            end
+            DONE: begin
+                next_state = IDLE;
+            end
+            default: next_state = IDLE;
+        endcase
+    end
+
+    // Tap RAM Interface
+    assign tap_EN = (current_state == LOAD_TAPS);
+    assign tap_WE = (current_state == LOAD_TAPS) ? 4'b1111 : 4'b0000;
+    assign tap_A  = tap_addr;
+    assign tap_Di = tap_coeffs[tap_addr];
+
+    // Data RAM Interface
+    assign data_EN = (current_state == PROCESS_DATA);
+    assign data_WE = 4'b0000; // Read-only for data RAM
+    assign data_A  = data_addr;
+    assign data_Di = 32'b0;
+
+    // FIR Computation Logic
+    always @(posedge axis_clk or negedge axis_rst_n) begin
+        if (!axis_rst_n) begin
+            accumulator <= 0;
+            input_buffer <= '{default: 0};
+        end else if (current_state == PROCESS_DATA) begin
+            accumulator <= 0;
+            for (int i = 0; i < Tape_Num; i = i + 1) begin
+                accumulator <= accumulator + tap_coeffs[i] * input_buffer[i];
+            end
+            input_buffer <= {ss_tdata, input_buffer[0:Tape_Num-2]}; // Shift input buffer
+        end
+    end
+
+    // AXI-Stream Logic
+    assign ss_tready = (current_state == PROCESS_DATA);
+    assign sm_tvalid = (current_state == DONE);
+    assign sm_tdata  = accumulator;
+    assign sm_tlast  = (current_state == DONE);
 
 endmodule
