@@ -54,8 +54,6 @@ module fir
     reg [pDATA_WIDTH-1:0] tap_coeffs [0:Tape_Num-1]; // Tap coefficients
     reg [pDATA_WIDTH-1:0] data_length;               // Data length
     reg ap_start;                                    // Start signal
-    reg ap_done;                                     // Done signal
-    reg ap_idle;                                     // Idle signal
 
     reg [pADDR_WIDTH-1:0] tap_addr;                  // Tap RAM address
     reg [pADDR_WIDTH-1:0] data_addr;                 // Data RAM address
